@@ -29,9 +29,7 @@ gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 # --- FSM СОСТОЯНИЯ ---
 class DiplomatState(StatesGroup):
-    waiting_for_rewrite_text = State()
-    waiting_for_task_text = State()
-    rewrite_text_saved = State()
+    text_saved = State()
 
 class AdminState(StatesGroup):
     waiting_for_broadcast = State()
@@ -42,13 +40,10 @@ class AdminState(StatesGroup):
 def format_gemini_response(text: str) -> str:
     """Безопасное преобразование Markdown от Gemini в HTML для Telegram."""
     text = html.escape(text)
-    # Жирный текст
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    # Заголовки (### Заголовок)
     text = re.sub(r'^###\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
     text = re.sub(r'^##\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
     text = re.sub(r'^#\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
-    # Списки
     text = re.sub(r'^(\s*)\* ', r'\1• ', text, flags=re.MULTILINE)
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
@@ -57,11 +52,19 @@ def format_gemini_response(text: str) -> str:
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✍️ Переписать текст"), KeyboardButton(text="💼 Бизнес-задачи")],
-            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="❓ Помощь")]
+            [KeyboardButton(text="✍️ Отправить текст")],
+            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="💎 Купить безлимит")],
+            [KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True
     )
+
+def get_action_keyboard():
+    """Клавиатура выбора действия после отправки текста"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Переписать текст (Стили)", callback_data="action_rewrite")],
+        [InlineKeyboardButton(text="💼 Бизнес-задачи (КП, Резюме...)", callback_data="action_business")]
+    ])
 
 def get_styles_keyboard():
     builder = []
@@ -73,18 +76,27 @@ def get_styles_keyboard():
             row = []
     if row:
         builder.append(row)
+    builder.append([InlineKeyboardButton(text="🔙 Назад", callback_data="action_back")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 def get_tasks_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📑 Коммерческое предложение", callback_data="task_cp")],
         [InlineKeyboardButton(text="📄 Резюме", callback_data="task_resume"),
          InlineKeyboardButton(text="📊 Презентация", callback_data="task_presentation")],
         [InlineKeyboardButton(text="📝 Выжимка", callback_data="task_summary"),
          InlineKeyboardButton(text="💡 Идеи", callback_data="task_brainstorm")],
         [InlineKeyboardButton(text="✉️ Холодное письмо", callback_data="task_cold_email"),
-         InlineKeyboardButton(text="📱 Пост для соцсетей", callback_data="task_post")],
-        [InlineKeyboardButton(text="🗣 Подготовка к интервью", callback_data="task_interview")]
+         InlineKeyboardButton(text="📱 Пост", callback_data="task_post")],
+        [InlineKeyboardButton(text="🗣 Интервью", callback_data="task_interview")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="action_back")]
     ])
+
+def get_post_generation_keyboard(is_premium: bool):
+    buttons = [[InlineKeyboardButton(text="🔁 Другая задача с этим же текстом", callback_data="action_back")]]
+    if not is_premium:
+        buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_paywall_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -136,6 +148,11 @@ async def cmd_status(message: Message, state: FSMContext):
     else:
         await message.answer(text)
 
+@router.message(F.text == "✍️ Отправить текст")
+async def btn_send_text(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Просто отправьте мне любой текст или данные в чат 👇")
+
 # --- ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ ---
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
@@ -183,9 +200,9 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
         try:
             await message.copy_to(u['user_id'])
             sent_count += 1
-            await asyncio.sleep(0.05) # Защита от спам-лимитов Telegram
+            await asyncio.sleep(0.05)
         except Exception:
-            pass # Пользователь заблокировал бота
+            pass
             
     await message.answer(f"✅ Рассылка завершена!\nУспешно доставлено: <b>{sent_count}</b>.")
     await state.clear()
@@ -231,123 +248,67 @@ async def admin_add_req_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Количество должно быть числом. Попробуйте снова.")
 
-# --- МЕНЮ БИЗНЕС-ЗАДАЧ ---
-@router.message(F.text == "💼 Бизнес-задачи")
-async def btn_business_tasks(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Выберите задачу, с которой я могу помочь:", reply_markup=get_tasks_keyboard())
-
-@router.callback_query(F.data.startswith("task_"))
-async def process_task_selection(callback: CallbackQuery, state: FSMContext):
-    task_key = callback.data.split("_", 1)[1]
-    task_info = config.ASSISTANT_TASKS.get(task_key)
-    
-    if not task_info:
-        await callback.answer("Ошибка задачи", show_alert=True)
-        return
-        
-    await state.update_data(task=task_key)
-    await state.set_state(DiplomatState.waiting_for_task_text)
-    
-    await callback.message.edit_text(f"Выбрано: <b>{task_info['name']}</b>\n\nОтправьте мне вводные данные (текст, тезисы, идеи), и я приступлю к работе ✍️")
-    await callback.answer()
-
-@router.message(DiplomatState.waiting_for_task_text, F.text)
-async def process_task_text(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = await check_user(user_id)
-    
-    if not user['is_premium'] and user['free_requests'] <= 0:
-        await message.answer(config.TEXT_PAYWALL, reply_markup=get_paywall_keyboard())
-        return
-
-    text = message.text.strip()
-    if len(text) < config.MIN_TEXT_LENGTH:
-        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более подробные данные.")
-        return
-    if len(text) > config.MAX_TEXT_LENGTH:
-        await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов).")
-        return
-
-    data = await state.get_data()
-    task_key = data.get("task")
-    task_info = config.ASSISTANT_TASKS.get(task_key)
-
-    wait_msg = await message.answer(f"⏳ Готовлю {task_info['name'].lower()}...")
-
-    try:
-        prompt = f"{task_info['prompt']}\n\nДанные от пользователя:\n{text}"
-        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        result_text = response.text.strip()
-        if not result_text:
-            raise ValueError("Empty response")
-    except Exception as e:
-        logger.error(f"Gemini Error: {e}")
-        await wait_msg.edit_text("❌ Ошибка при обращении к нейросети. Попробуйте позже.")
-        return
-
-    database.save_usage(user_id, task_key, text, result_text)
-    database.increment_total_requests(user_id)
-    if not user['is_premium']:
-        database.decrement_request(user_id)
-        user['free_requests'] -= 1
-
-    safe_result = format_gemini_response(result_text)
-    final_msg = f"✨ <b>Результат ({task_info['name']}):</b>\n\n{safe_result}"
-
-    if not user['is_premium']:
-        if user['free_requests'] == 1:
-            final_msg += config.TEXT_LAST_ATTEMPT
-        elif user['free_requests'] > 1:
-            final_msg += f"\n\n💡 <i>Осталось бесплатных попыток: {user['free_requests']}</i>"
-
-    await wait_msg.edit_text(final_msg)
-    await state.clear()
-
-# --- ОБРАБОТКА ПЕРЕПИСЫВАНИЯ ТЕКСТА ---
-@router.message(F.text == "✍️ Переписать текст")
-async def btn_rewrite(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(DiplomatState.waiting_for_rewrite_text)
-    await message.answer("Отправьте мне текст, который нужно переписать ✍️")
-
+# --- ЕДИНАЯ ТОЧКА ВХОДА ДЛЯ ТЕКСТА ---
 @router.message(F.text)
-async def process_user_text_default(message: Message, state: FSMContext):
-    # Если текст не является командой или кнопкой меню, считаем, что пользователь хочет его переписать
-    if message.text.startswith('/') or message.text in ["✍️ Переписать текст", "💼 Бизнес-задачи", "👤 Мой профиль", "❓ Помощь"]:
+async def process_any_text(message: Message, state: FSMContext):
+    # Игнорируем команды
+    if message.text.startswith('/'):
+        return
+
+    # Игнорируем кнопки Reply-клавиатуры, если они случайно попали сюда
+    if message.text in ["✍️ Отправить текст", "👤 Мой профиль", "💎 Купить безлимит", "❓ Помощь"]:
         return
 
     text = message.text.strip()
     if len(text) < config.MIN_TEXT_LENGTH:
-        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более содержательное сообщение.")
+        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более содержательное сообщение или данные.")
         return
     if len(text) > config.MAX_TEXT_LENGTH:
         await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов). Сократите его.")
         return
 
+    # Сохраняем текст и спрашиваем, что с ним делать
     await state.update_data(source_text=text)
-    await state.set_state(DiplomatState.rewrite_text_saved)
+    await state.set_state(DiplomatState.text_saved)
     
     await message.answer(
-        "Текст принят! Выберите, в каком стиле его переписать 👇",
-        reply_markup=get_styles_keyboard()
+        "✅ <b>Текст принят!</b>\nЧто вы хотите с ним сделать?",
+        reply_markup=get_action_keyboard()
     )
 
-@router.callback_query(F.data == "reselect_style")
-async def reselect_style(callback: CallbackQuery, state: FSMContext):
+# --- НАВИГАЦИЯ ПО INLINE МЕНЮ ---
+@router.callback_query(F.data == "action_back")
+async def action_back(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data.get("source_text"):
-        await callback.message.answer("Текст не найден. Пожалуйста, отправьте данные заново.")
+        await callback.message.answer("Текст потерялся. Пожалуйста, отправьте его заново.")
         await callback.answer()
         return
     try:
-        await callback.message.edit_text("Выберите другой стиль для этого текста 👇", reply_markup=get_styles_keyboard())
+        await callback.message.edit_text("✅ <b>Текст принят!</b>\nЧто вы хотите с ним сделать?", reply_markup=get_action_keyboard())
     except TelegramBadRequest:
         pass
     await callback.answer()
 
-@router.callback_query(F.data.startswith("style_"))
-async def process_style_selection(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "action_rewrite")
+async def action_rewrite(callback: CallbackQuery):
+    try:
+        await callback.message.edit_text("Выберите, в каком стиле переписать текст 👇", reply_markup=get_styles_keyboard())
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+@router.callback_query(F.data == "action_business")
+async def action_business(callback: CallbackQuery):
+    try:
+        await callback.message.edit_text("Выберите бизнес-задачу 👇", reply_markup=get_tasks_keyboard())
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+# --- ВЫПОЛНЕНИЕ ЗАДАЧ (GEMINI) ---
+@router.callback_query(F.data.startswith("style_") | F.data.startswith("task_"))
+async def process_generation(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await check_user(user_id)
     
@@ -364,20 +325,27 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    style_key = callback.data.split("_")[1]
-    style_info = config.AI_MODES.get(style_key)
+    # Определяем, что выбрал пользователь (стиль или бизнес-задачу)
+    action_type, action_key = callback.data.split("_", 1)
     
-    if not style_info:
-        await callback.answer("Неизвестный стиль.", show_alert=True)
+    if action_type == "style":
+        info = config.AI_MODES.get(action_key)
+        name = info['btn'] if info else "Переписывание"
+    else:
+        info = config.ASSISTANT_TASKS.get(action_key)
+        name = info['name'] if info else "Бизнес-задача"
+    
+    if not info:
+        await callback.answer("Неизвестное действие.", show_alert=True)
         return
 
     try:
-        await callback.message.edit_text(f"⏳ Переписываю в стиле «{style_info['btn']}»...")
+        await callback.message.edit_text(f"⏳ Обрабатываю (Режим: {name})...")
     except TelegramBadRequest:
         pass
 
     try:
-        prompt = f"{style_info['prompt']}\n\nТекст для обработки:\n{source_text}"
+        prompt = f"{info['prompt']}\n\nДанные от пользователя:\n{source_text}"
         response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         result_text = response.text.strip()
         if not result_text:
@@ -388,7 +356,7 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    database.save_usage(user_id, style_key, source_text, result_text)
+    database.save_usage(user_id, action_key, source_text, result_text)
     database.increment_total_requests(user_id)
     
     if not user['is_premium']:
@@ -396,7 +364,7 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         user['free_requests'] -= 1
 
     safe_result = format_gemini_response(result_text)
-    final_msg = f"✨ <b>Результат ({style_info['btn']}):</b>\n\n{safe_result}"
+    final_msg = f"✨ <b>Результат ({name}):</b>\n\n{safe_result}"
     
     if not user['is_premium']:
         if user['free_requests'] == 1:
@@ -404,20 +372,16 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         elif user['free_requests'] > 1:
             final_msg += f"\n\n💡 <i>Осталось бесплатных попыток: {user['free_requests']}</i>"
 
-    buttons = [[InlineKeyboardButton(text="🔁 Выбрать другой стиль", callback_data="reselect_style")]]
-    if not user['is_premium']:
-        buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-
     try:
-        await callback.message.edit_text(final_msg, reply_markup=kb)
+        await callback.message.edit_text(final_msg, reply_markup=get_post_generation_keyboard(user['is_premium']))
     except TelegramBadRequest:
-        await callback.message.answer(final_msg, reply_markup=kb)
+        await callback.message.answer(final_msg, reply_markup=get_post_generation_keyboard(user['is_premium']))
 
     await callback.answer()
 
 # --- ПЛАТЕЖИ (TELEGRAM STARS) ---
 @router.message(Command("buy"))
+@router.message(F.text == "💎 Купить безлимит")
 @router.callback_query(F.data == "buy_premium")
 async def process_buy(event: Message | CallbackQuery):
     user_id = event.from_user.id
