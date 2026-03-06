@@ -14,7 +14,7 @@ def init_db():
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Таблица пользователей (Исправлено: используем f-строку для DEFAULT)
+            # ИСПРАВЛЕНО: Используем f-строку вместо знака вопроса для DEFAULT
             cursor.execute(f'''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
