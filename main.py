@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import html
+import re
 import uuid
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
@@ -18,36 +19,46 @@ from google import genai
 import config
 import database
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
-bot = Bot(
-    token=config.BOT_TOKEN, 
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
-
-# Настройка нового Gemini API клиента
 gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-# FSM Состояния
+# --- FSM СОСТОЯНИЯ ---
 class DiplomatState(StatesGroup):
-    waiting_for_text = State()
-    text_saved = State()
+    waiting_for_rewrite_text = State()
+    waiting_for_task_text = State()
+    rewrite_text_saved = State()
+
+class AdminState(StatesGroup):
+    waiting_for_broadcast = State()
+    waiting_for_add_req_id = State()
+    waiting_for_add_req_amount = State()
+
+# --- УТИЛИТЫ ФОРМАТИРОВАНИЯ ---
+def format_gemini_response(text: str) -> str:
+    """Безопасное преобразование Markdown от Gemini в HTML для Telegram."""
+    text = html.escape(text)
+    # Жирный текст
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    # Заголовки (### Заголовок)
+    text = re.sub(r'^###\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    text = re.sub(r'^##\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    text = re.sub(r'^#\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # Списки
+    text = re.sub(r'^(\s*)\* ', r'\1• ', text, flags=re.MULTILINE)
+    text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
+    return text
 
 # --- КЛАВИАТУРЫ ---
-
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✍️ Новый текст"), KeyboardButton(text="💎 Купить безлимит")],
-            [KeyboardButton(text="📊 Мой статус"), KeyboardButton(text="❓ Помощь")]
+            [KeyboardButton(text="✍️ Переписать текст"), KeyboardButton(text="💼 Бизнес-задачи")],
+            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True
     )
@@ -64,25 +75,34 @@ def get_styles_keyboard():
         builder.append(row)
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
-def get_post_generation_keyboard(is_premium: bool):
-    buttons = [[InlineKeyboardButton(text="🔁 Выбрать другой стиль", callback_data="reselect_style")]]
-    if not is_premium:
-        buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def get_tasks_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 Резюме", callback_data="task_resume"),
+         InlineKeyboardButton(text="📊 Презентация", callback_data="task_presentation")],
+        [InlineKeyboardButton(text="📝 Выжимка", callback_data="task_summary"),
+         InlineKeyboardButton(text="💡 Идеи", callback_data="task_brainstorm")],
+        [InlineKeyboardButton(text="✉️ Холодное письмо", callback_data="task_cold_email"),
+         InlineKeyboardButton(text="📱 Пост для соцсетей", callback_data="task_post")],
+        [InlineKeyboardButton(text="🗣 Подготовка к интервью", callback_data="task_interview")]
+    ])
 
 def get_paywall_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 Купить безлимит (50 Stars)", callback_data="buy_premium")]
     ])
 
-# --- MIDDLEWARE / УТИЛИТЫ ---
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🎁 Выдать запросы", callback_data="admin_add_req")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
+    ])
 
 async def check_user(user_id: int):
     database.create_user_if_not_exists(user_id)
     return database.get_user(user_id)
 
-# --- ОБРАБОТЧИКИ КОМАНД ---
-
+# --- ОБРАБОТЧИКИ БАЗОВЫХ КОМАНД ---
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await check_user(message.from_user.id)
@@ -91,57 +111,213 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
-async def cmd_help(message: Message):
+async def cmd_help(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer(config.TEXT_HELP, reply_markup=get_main_keyboard())
 
 @router.message(Command("status"))
-@router.message(F.text == "📊 Мой статус")
-async def cmd_status(message: Message):
+@router.message(F.text == "👤 Мой профиль")
+async def cmd_status(message: Message, state: FSMContext):
+    await state.clear()
     user = await check_user(message.from_user.id)
     status_text = "💎 <b>Premium (Безлимит)</b>" if user['is_premium'] else "🆓 <b>Бесплатный тариф</b>"
     
     text = (
-        f"📊 <b>Ваш статус:</b>\n\n"
+        f"👤 <b>Ваш профиль:</b>\n\n"
         f"Тариф: {status_text}\n"
         f"Использовано запросов: <b>{user['total_requests']}</b>\n"
+        f"Ваш ID: <code>{message.from_user.id}</code>\n"
     )
     
     if not user['is_premium']:
         text += f"Осталось бесплатных попыток: <b>{user['free_requests']}</b>\n\n"
-        text += "<i>Premium даёт безлимитный доступ навсегда. Вы забудете о лимитах и сможете переписывать любые рабочие сообщения.</i>"
+        text += "<i>Premium даёт безлимитный доступ навсегда. Вы забудете о лимитах и сможете решать любые рабочие задачи.</i>"
         await message.answer(text, reply_markup=get_paywall_keyboard())
     else:
         await message.answer(text)
 
+# --- ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ ---
 @router.message(Command("admin"))
-async def cmd_admin(message: Message):
+async def cmd_admin(message: Message, state: FSMContext):
+    await state.clear()
     if message.from_user.id != config.ADMIN_ID:
+        return
+    await message.answer("🔧 <b>Панель управления</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    if callback.from_user.id != config.ADMIN_ID:
         return
     stats = database.get_stats()
     text = (
-        "🔧 <b>Админ-панель</b>\n\n"
+        "📊 <b>Статистика проекта:</b>\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
         f"💎 Premium пользователей: {stats['premium_users']}\n"
         f"📝 Всего генераций: {stats['total_generations']}\n"
         f"💳 Успешных оплат: {stats['total_payments']}\n"
         f"💰 Доход: {stats['total_revenue_stars']} Stars"
     )
-    await message.answer(text)
+    await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    await callback.answer()
 
-# --- ОБРАБОТКА ТЕКСТА ---
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != config.ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_broadcast)
+    await callback.message.edit_text("📢 Отправьте сообщение (текст, фото, видео), которое нужно разослать всем пользователям бота.\n\n<i>Для отмены отправьте /start</i>")
+    await callback.answer()
 
-@router.message(F.text == "✍️ Новый текст")
-async def btn_new_text(message: Message, state: FSMContext):
+@router.message(AdminState.waiting_for_broadcast)
+async def admin_broadcast_send(message: Message, state: FSMContext):
+    if message.text == '/start':
+        await state.clear()
+        await message.answer("Рассылка отменена.", reply_markup=get_main_keyboard())
+        return
+
+    users = database.get_all_users()
+    sent_count = 0
+    await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
+    
+    for u in users:
+        try:
+            await message.copy_to(u['user_id'])
+            sent_count += 1
+            await asyncio.sleep(0.05) # Защита от спам-лимитов Telegram
+        except Exception:
+            pass # Пользователь заблокировал бота
+            
+    await message.answer(f"✅ Рассылка завершена!\nУспешно доставлено: <b>{sent_count}</b>.")
     await state.clear()
-    await message.answer("Отправьте мне текст, который нужно переписать ✍️")
 
-@router.message(F.text)
-async def process_user_text(message: Message, state: FSMContext):
-    if message.text.startswith('/') or message.text in ["✍️ Новый текст", "💎 Купить безлимит", "📊 Мой статус", "❓ Помощь"]:
+@router.callback_query(F.data == "admin_add_req")
+async def admin_add_req_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != config.ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_add_req_id)
+    await callback.message.edit_text("Введите <b>ID пользователя</b>, которому нужно начислить запросы:")
+    await callback.answer()
+
+@router.message(AdminState.waiting_for_add_req_id)
+async def admin_add_req_id(message: Message, state: FSMContext):
+    try:
+        target_id = int(message.text.strip())
+        user = database.get_user(target_id)
+        if not user:
+            await message.answer("❌ Пользователь не найден. Проверьте ID и попробуйте снова.")
+            return
+        await state.update_data(target_id=target_id)
+        await state.set_state(AdminState.waiting_for_add_req_amount)
+        await message.answer("Отлично. Теперь введите <b>количество запросов</b> для начисления:")
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
+
+@router.message(AdminState.waiting_for_add_req_amount)
+async def admin_add_req_amount(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        target_id = data['target_id']
+        
+        database.add_requests(target_id, amount)
+        await message.answer(f"✅ Успешно! Пользователю <code>{target_id}</code> начислено <b>{amount}</b> запросов.")
+        
+        try:
+            await bot.send_message(target_id, f"🎁 <b>Вам начислен бонус!</b>\nАдминистратор добавил вам <b>{amount}</b> бесплатных запросов.")
+        except Exception:
+            pass
+            
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Количество должно быть числом. Попробуйте снова.")
+
+# --- МЕНЮ БИЗНЕС-ЗАДАЧ ---
+@router.message(F.text == "💼 Бизнес-задачи")
+async def btn_business_tasks(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите задачу, с которой я могу помочь:", reply_markup=get_tasks_keyboard())
+
+@router.callback_query(F.data.startswith("task_"))
+async def process_task_selection(callback: CallbackQuery, state: FSMContext):
+    task_key = callback.data.split("_", 1)[1]
+    task_info = config.ASSISTANT_TASKS.get(task_key)
+    
+    if not task_info:
+        await callback.answer("Ошибка задачи", show_alert=True)
+        return
+        
+    await state.update_data(task=task_key)
+    await state.set_state(DiplomatState.waiting_for_task_text)
+    
+    await callback.message.edit_text(f"Выбрано: <b>{task_info['name']}</b>\n\nОтправьте мне вводные данные (текст, тезисы, идеи), и я приступлю к работе ✍️")
+    await callback.answer()
+
+@router.message(DiplomatState.waiting_for_task_text, F.text)
+async def process_task_text(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = await check_user(user_id)
+    
+    if not user['is_premium'] and user['free_requests'] <= 0:
+        await message.answer(config.TEXT_PAYWALL, reply_markup=get_paywall_keyboard())
         return
 
     text = message.text.strip()
-    
+    if len(text) < config.MIN_TEXT_LENGTH:
+        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более подробные данные.")
+        return
+    if len(text) > config.MAX_TEXT_LENGTH:
+        await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов).")
+        return
+
+    data = await state.get_data()
+    task_key = data.get("task")
+    task_info = config.ASSISTANT_TASKS.get(task_key)
+
+    wait_msg = await message.answer(f"⏳ Готовлю {task_info['name'].lower()}...")
+
+    try:
+        prompt = f"{task_info['prompt']}\n\nДанные от пользователя:\n{text}"
+        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        result_text = response.text.strip()
+        if not result_text:
+            raise ValueError("Empty response")
+    except Exception as e:
+        logger.error(f"Gemini Error: {e}")
+        await wait_msg.edit_text("❌ Ошибка при обращении к нейросети. Попробуйте позже.")
+        return
+
+    database.save_usage(user_id, task_key, text, result_text)
+    database.increment_total_requests(user_id)
+    if not user['is_premium']:
+        database.decrement_request(user_id)
+        user['free_requests'] -= 1
+
+    safe_result = format_gemini_response(result_text)
+    final_msg = f"✨ <b>Результат ({task_info['name']}):</b>\n\n{safe_result}"
+
+    if not user['is_premium']:
+        if user['free_requests'] == 1:
+            final_msg += config.TEXT_LAST_ATTEMPT
+        elif user['free_requests'] > 1:
+            final_msg += f"\n\n💡 <i>Осталось бесплатных попыток: {user['free_requests']}</i>"
+
+    await wait_msg.edit_text(final_msg)
+    await state.clear()
+
+# --- ОБРАБОТКА ПЕРЕПИСЫВАНИЯ ТЕКСТА ---
+@router.message(F.text == "✍️ Переписать текст")
+async def btn_rewrite(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(DiplomatState.waiting_for_rewrite_text)
+    await message.answer("Отправьте мне текст, который нужно переписать ✍️")
+
+@router.message(F.text)
+async def process_user_text_default(message: Message, state: FSMContext):
+    # Если текст не является командой или кнопкой меню, считаем, что пользователь хочет его переписать
+    if message.text.startswith('/') or message.text in ["✍️ Переписать текст", "💼 Бизнес-задачи", "👤 Мой профиль", "❓ Помощь"]:
+        return
+
+    text = message.text.strip()
     if len(text) < config.MIN_TEXT_LENGTH:
         await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более содержательное сообщение.")
         return
@@ -150,32 +326,22 @@ async def process_user_text(message: Message, state: FSMContext):
         return
 
     await state.update_data(source_text=text)
-    await state.set_state(DiplomatState.text_saved)
+    await state.set_state(DiplomatState.rewrite_text_saved)
     
     await message.answer(
         "Текст принят! Выберите, в каком стиле его переписать 👇",
         reply_markup=get_styles_keyboard()
     )
 
-@router.message()
-async def process_non_text(message: Message):
-    await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение. Я работаю только с текстом.")
-
-# --- ОБРАБОТКА ВЫБОРА СТИЛЯ (GEMINI) ---
-
 @router.callback_query(F.data == "reselect_style")
 async def reselect_style(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data.get("source_text"):
-        await callback.message.answer("Текст не найден. Пожалуйста, отправьте сообщение заново.")
+        await callback.message.answer("Текст не найден. Пожалуйста, отправьте данные заново.")
         await callback.answer()
         return
-    
     try:
-        await callback.message.edit_text(
-            "Выберите другой стиль для этого текста 👇",
-            reply_markup=get_styles_keyboard()
-        )
+        await callback.message.edit_text("Выберите другой стиль для этого текста 👇", reply_markup=get_styles_keyboard())
     except TelegramBadRequest:
         pass
     await callback.answer()
@@ -212,21 +378,13 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
 
     try:
         prompt = f"{style_info['prompt']}\n\nТекст для обработки:\n{source_text}"
-        
-        response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
+        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         result_text = response.text.strip()
-        
         if not result_text:
             raise ValueError("Empty response from Gemini")
-            
     except Exception as e:
         logger.error(f"Gemini API Error: {e}")
-        await callback.message.edit_text(
-            "❌ Произошла ошибка при обращении к нейросети. Пожалуйста, попробуйте чуть позже."
-        )
+        await callback.message.edit_text("❌ Произошла ошибка при обращении к нейросети. Пожалуйста, попробуйте чуть позже.")
         await callback.answer()
         return
 
@@ -237,8 +395,8 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         database.decrement_request(user_id)
         user['free_requests'] -= 1
 
-    safe_result = html.escape(result_text)
-    final_msg = f"✨ <b>Результат ({style_info['btn']}):</b>\n\n<code>{safe_result}</code>"
+    safe_result = format_gemini_response(result_text)
+    final_msg = f"✨ <b>Результат ({style_info['btn']}):</b>\n\n{safe_result}"
     
     if not user['is_premium']:
         if user['free_requests'] == 1:
@@ -246,23 +404,20 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         elif user['free_requests'] > 1:
             final_msg += f"\n\n💡 <i>Осталось бесплатных попыток: {user['free_requests']}</i>"
 
+    buttons = [[InlineKeyboardButton(text="🔁 Выбрать другой стиль", callback_data="reselect_style")]]
+    if not user['is_premium']:
+        buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
     try:
-        await callback.message.edit_text(
-            final_msg,
-            reply_markup=get_post_generation_keyboard(user['is_premium'])
-        )
+        await callback.message.edit_text(final_msg, reply_markup=kb)
     except TelegramBadRequest:
-        await callback.message.answer(
-            final_msg,
-            reply_markup=get_post_generation_keyboard(user['is_premium'])
-        )
+        await callback.message.answer(final_msg, reply_markup=kb)
 
     await callback.answer()
 
 # --- ПЛАТЕЖИ (TELEGRAM STARS) ---
-
 @router.message(Command("buy"))
-@router.message(F.text == "💎 Купить безлимит")
 @router.callback_query(F.data == "buy_premium")
 async def process_buy(event: Message | CallbackQuery):
     user_id = event.from_user.id
@@ -282,7 +437,7 @@ async def process_buy(event: Message | CallbackQuery):
     
     invoice_kwargs = {
         "title": "Безлимит в «Дипломате» 💎",
-        "description": "Навсегда снимите ограничения. Переписывайте любые сообщения в профессиональный деловой стиль.",
+        "description": "Навсегда снимите ограничения. Решайте любые бизнес-задачи без лимитов.",
         "payload": payload,
         "provider_token": config.PROVIDER_TOKEN,
         "currency": "XTR",
@@ -319,32 +474,25 @@ async def successful_payment_handler(message: Message):
         logger.warning(f"Duplicate payment payload received: {payment_info.invoice_payload}")
 
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
-
 @dp.errors()
 async def global_error_handler(event):
     logger.error(f"Update caused error: {event.exception}")
     return True
 
-# --- ЖИЗНЕННЫЙ ЦИКЛ БОТА (ИСПРАВЛЕНИЕ КОНФЛИКТОВ RAILWAY) ---
-
+# --- ЖИЗНЕННЫЙ ЦИКЛ БОТА ---
 async def on_startup(bot: Bot):
     database.init_db()
-    # Сбрасываем старые апдейты, чтобы не было конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Bot started and webhook dropped")
 
 async def on_shutdown(bot: Bot):
     logger.info("Bot shutting down. Closing session...")
-    # Корректно закрываем сессию, чтобы Railway мог запустить новый контейнер без конфликтов
     await bot.session.close()
 
 async def main():
     dp.include_router(router)
-    
-    # Регистрируем функции старта и остановки
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
