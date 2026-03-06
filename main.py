@@ -28,7 +28,7 @@ router = Router()
 gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 # --- FSM СОСТОЯНИЯ ---
-class DiplomatState(StatesGroup):
+class AppState(StatesGroup):
     text_saved = State()
 
 class AdminState(StatesGroup):
@@ -38,7 +38,6 @@ class AdminState(StatesGroup):
 
 # --- УТИЛИТЫ ФОРМАТИРОВАНИЯ ---
 def format_gemini_response(text: str) -> str:
-    """Безопасное преобразование Markdown от Gemini в HTML для Telegram."""
     text = html.escape(text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'^###\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
@@ -48,7 +47,7 @@ def format_gemini_response(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-# --- КЛАВИАТУРЫ ---
+# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ ---
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -59,41 +58,33 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-def get_action_keyboard():
-    """Клавиатура выбора действия после отправки текста"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Переписать текст (Стили)", callback_data="action_rewrite")],
-        [InlineKeyboardButton(text="💼 Бизнес-задачи (КП, Резюме...)", callback_data="action_business")]
-    ])
-
-def get_styles_keyboard():
+def get_categories_keyboard():
+    """Главное меню выбора категории после отправки текста"""
     builder = []
     row = []
-    for key, data in config.AI_MODES.items():
-        row.append(InlineKeyboardButton(text=data["btn"], callback_data=f"style_{key}"))
+    for cat_id, cat_data in config.CATEGORIES.items():
+        row.append(InlineKeyboardButton(text=cat_data["name"], callback_data=f"cat_{cat_id}"))
         if len(row) == 2:
             builder.append(row)
             row = []
     if row:
         builder.append(row)
-    builder.append([InlineKeyboardButton(text="🔙 Назад", callback_data="action_back")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
-def get_tasks_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📑 Коммерческое предложение", callback_data="task_cp")],
-        [InlineKeyboardButton(text="📄 Резюме", callback_data="task_resume"),
-         InlineKeyboardButton(text="📊 Презентация", callback_data="task_presentation")],
-        [InlineKeyboardButton(text="📝 Выжимка", callback_data="task_summary"),
-         InlineKeyboardButton(text="💡 Идеи", callback_data="task_brainstorm")],
-        [InlineKeyboardButton(text="✉️ Холодное письмо", callback_data="task_cold_email"),
-         InlineKeyboardButton(text="📱 Пост", callback_data="task_post")],
-        [InlineKeyboardButton(text="🗣 Интервью", callback_data="task_interview")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="action_back")]
-    ])
+def get_prompts_keyboard(category_id: str):
+    """Меню конкретных задач внутри категории + кнопка Назад"""
+    builder = []
+    prompts = config.CATEGORIES[category_id].get("prompts", config.CATEGORIES[category_id].get("prompt", {}))
+    
+    for prompt_id, prompt_data in prompts.items():
+        builder.append([InlineKeyboardButton(text=prompt_data["btn"], callback_data=f"gen_{category_id}_{prompt_id}")])
+        
+    builder.append([InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="back_to_cats")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
 
 def get_post_generation_keyboard(is_premium: bool):
-    buttons = [[InlineKeyboardButton(text="🔁 Другая задача с этим же текстом", callback_data="action_back")]]
+    """Клавиатура после генерации текста"""
+    buttons = [[InlineKeyboardButton(text="🔁 Другая задача с этим же текстом", callback_data="back_to_cats")]]
     if not is_premium:
         buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -103,11 +94,17 @@ def get_paywall_keyboard():
         [InlineKeyboardButton(text="💎 Купить безлимит (50 Stars)", callback_data="buy_premium")]
     ])
 
+# --- КЛАВИАТУРЫ АДМИНА ---
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="🎁 Выдать запросы", callback_data="admin_add_req")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")]
+    ])
+
+def get_admin_cancel_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_cancel")]
     ])
 
 async def check_user(user_id: int):
@@ -151,15 +148,24 @@ async def cmd_status(message: Message, state: FSMContext):
 @router.message(F.text == "✍️ Отправить текст")
 async def btn_send_text(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Просто отправьте мне любой текст или данные в чат 👇")
+    await message.answer("Просто отправьте мне любой текст, письмо или идею в чат 👇")
 
-# --- ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ ---
+# --- ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ С КНОПКАМИ НАЗАД ---
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
     if message.from_user.id != config.ADMIN_ID:
         return
     await message.answer("🔧 <b>Панель управления</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
+
+@router.callback_query(F.data == "admin_cancel")
+async def admin_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.edit_text("🔧 <b>Панель управления</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Действие отменено")
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
@@ -174,7 +180,9 @@ async def admin_stats(callback: CallbackQuery):
         f"💳 Успешных оплат: {stats['total_payments']}\n"
         f"💰 Доход: {stats['total_revenue_stars']} Stars"
     )
-    await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    # Добавляем кнопку Назад в админку
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_cancel")]])
+    await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "admin_broadcast")
@@ -182,16 +190,11 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != config.ADMIN_ID:
         return
     await state.set_state(AdminState.waiting_for_broadcast)
-    await callback.message.edit_text("📢 Отправьте сообщение (текст, фото, видео), которое нужно разослать всем пользователям бота.\n\n<i>Для отмены отправьте /start</i>")
+    await callback.message.edit_text("📢 Отправьте сообщение (текст, фото, видео), которое нужно разослать всем пользователям бота.", reply_markup=get_admin_cancel_keyboard())
     await callback.answer()
 
 @router.message(AdminState.waiting_for_broadcast)
 async def admin_broadcast_send(message: Message, state: FSMContext):
-    if message.text == '/start':
-        await state.clear()
-        await message.answer("Рассылка отменена.", reply_markup=get_main_keyboard())
-        return
-
     users = database.get_all_users()
     sent_count = 0
     await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
@@ -212,7 +215,7 @@ async def admin_add_req_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != config.ADMIN_ID:
         return
     await state.set_state(AdminState.waiting_for_add_req_id)
-    await callback.message.edit_text("Введите <b>ID пользователя</b>, которому нужно начислить запросы:")
+    await callback.message.edit_text("Введите <b>ID пользователя</b>, которому нужно начислить запросы:", reply_markup=get_admin_cancel_keyboard())
     await callback.answer()
 
 @router.message(AdminState.waiting_for_add_req_id)
@@ -221,13 +224,13 @@ async def admin_add_req_id(message: Message, state: FSMContext):
         target_id = int(message.text.strip())
         user = database.get_user(target_id)
         if not user:
-            await message.answer("❌ Пользователь не найден. Проверьте ID и попробуйте снова.")
+            await message.answer("❌ Пользователь не найден. Проверьте ID и попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
             return
         await state.update_data(target_id=target_id)
         await state.set_state(AdminState.waiting_for_add_req_amount)
-        await message.answer("Отлично. Теперь введите <b>количество запросов</b> для начисления:")
+        await message.answer("Отлично. Теперь введите <b>количество запросов</b> для начисления:", reply_markup=get_admin_cancel_keyboard())
     except ValueError:
-        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
 
 @router.message(AdminState.waiting_for_add_req_amount)
 async def admin_add_req_amount(message: Message, state: FSMContext):
@@ -246,16 +249,14 @@ async def admin_add_req_amount(message: Message, state: FSMContext):
             
         await state.clear()
     except ValueError:
-        await message.answer("❌ Количество должно быть числом. Попробуйте снова.")
+        await message.answer("❌ Количество должно быть числом. Попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
 
-# --- ЕДИНАЯ ТОЧКА ВХОДА ДЛЯ ТЕКСТА ---
+
+# --- ЕДИНАЯ ТОЧКА ВХОДА ДЛЯ ТЕКСТА ПОЛЬЗОВАТЕЛЯ ---
 @router.message(F.text)
 async def process_any_text(message: Message, state: FSMContext):
-    # Игнорируем команды
     if message.text.startswith('/'):
         return
-
-    # Игнорируем кнопки Reply-клавиатуры, если они случайно попали сюда
     if message.text in ["✍️ Отправить текст", "👤 Мой профиль", "💎 Купить безлимит", "❓ Помощь"]:
         return
 
@@ -267,47 +268,49 @@ async def process_any_text(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов). Сократите его.")
         return
 
-    # Сохраняем текст и спрашиваем, что с ним делать
     await state.update_data(source_text=text)
-    await state.set_state(DiplomatState.text_saved)
+    await state.set_state(AppState.text_saved)
     
     await message.answer(
-        "✅ <b>Текст принят!</b>\nЧто вы хотите с ним сделать?",
-        reply_markup=get_action_keyboard()
+        "✅ <b>Текст принят!</b>\nВыберите категорию задачи:",
+        reply_markup=get_categories_keyboard()
     )
 
-# --- НАВИГАЦИЯ ПО INLINE МЕНЮ ---
-@router.callback_query(F.data == "action_back")
-async def action_back(callback: CallbackQuery, state: FSMContext):
+# --- НАВИГАЦИЯ ПО INLINE МЕНЮ (НАЗАД И ВПЕРЕД) ---
+@router.callback_query(F.data == "back_to_cats")
+async def back_to_categories(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data.get("source_text"):
         await callback.message.answer("Текст потерялся. Пожалуйста, отправьте его заново.")
         await callback.answer()
         return
     try:
-        await callback.message.edit_text("✅ <b>Текст принят!</b>\nЧто вы хотите с ним сделать?", reply_markup=get_action_keyboard())
+        await callback.message.edit_text("✅ <b>Текст принят!</b>\nВыберите категорию задачи:", reply_markup=get_categories_keyboard())
     except TelegramBadRequest:
         pass
     await callback.answer()
 
-@router.callback_query(F.data == "action_rewrite")
-async def action_rewrite(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("cat_"))
+async def show_category_prompts(callback: CallbackQuery, state: FSMContext):
+    cat_id = callback.data.split("_")[1]
+    cat_info = config.CATEGORIES.get(cat_id)
+    
+    if not cat_info:
+        await callback.answer("Ошибка категории", show_alert=True)
+        return
+        
     try:
-        await callback.message.edit_text("Выберите, в каком стиле переписать текст 👇", reply_markup=get_styles_keyboard())
+        await callback.message.edit_text(
+            f"Категория: <b>{cat_info['name']}</b>\nВыберите конкретную задачу 👇", 
+            reply_markup=get_prompts_keyboard(cat_id)
+        )
     except TelegramBadRequest:
         pass
     await callback.answer()
 
-@router.callback_query(F.data == "action_business")
-async def action_business(callback: CallbackQuery):
-    try:
-        await callback.message.edit_text("Выберите бизнес-задачу 👇", reply_markup=get_tasks_keyboard())
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
 
 # --- ВЫПОЛНЕНИЕ ЗАДАЧ (GEMINI) ---
-@router.callback_query(F.data.startswith("style_") | F.data.startswith("task_"))
+@router.callback_query(F.data.startswith("gen_"))
 async def process_generation(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await check_user(user_id)
@@ -325,22 +328,21 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Определяем, что выбрал пользователь (стиль или бизнес-задачу)
-    action_type, action_key = callback.data.split("_", 1)
+    # Парсим callback: gen_{cat_id}_{prompt_id}
+    parts = callback.data.split("_")
+    cat_id = parts[1]
+    prompt_id = parts[2]
     
-    if action_type == "style":
-        info = config.AI_MODES.get(action_key)
-        name = info['btn'] if info else "Переписывание"
-    else:
-        info = config.ASSISTANT_TASKS.get(action_key)
-        name = info['name'] if info else "Бизнес-задача"
+    # Достаем промпт
+    prompts_dict = config.CATEGORIES.get(cat_id, {}).get("prompts", config.CATEGORIES.get(cat_id, {}).get("prompt", {}))
+    info = prompts_dict.get(prompt_id)
     
     if not info:
-        await callback.answer("Неизвестное действие.", show_alert=True)
+        await callback.answer("Неизвестная задача.", show_alert=True)
         return
 
     try:
-        await callback.message.edit_text(f"⏳ Обрабатываю (Режим: {name})...")
+        await callback.message.edit_text(f"⏳ Обрабатываю (Задача: {info['btn']})...")
     except TelegramBadRequest:
         pass
 
@@ -352,11 +354,11 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
             raise ValueError("Empty response from Gemini")
     except Exception as e:
         logger.error(f"Gemini API Error: {e}")
-        await callback.message.edit_text("❌ Произошла ошибка при обращении к нейросети. Пожалуйста, попробуйте чуть позже.")
+        await callback.message.edit_text("❌ Произошла ошибка при обращении к нейросети. Пожалуйста, попробуйте чуть позже.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_cats")]]))
         await callback.answer()
         return
 
-    database.save_usage(user_id, action_key, source_text, result_text)
+    database.save_usage(user_id, f"{cat_id}_{prompt_id}", source_text, result_text)
     database.increment_total_requests(user_id)
     
     if not user['is_premium']:
@@ -364,7 +366,7 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
         user['free_requests'] -= 1
 
     safe_result = format_gemini_response(result_text)
-    final_msg = f"✨ <b>Результат ({name}):</b>\n\n{safe_result}"
+    final_msg = f"✨ <b>Результат ({info['btn']}):</b>\n\n{safe_result}"
     
     if not user['is_premium']:
         if user['free_requests'] == 1:
@@ -400,7 +402,7 @@ async def process_buy(event: Message | CallbackQuery):
     prices = [LabeledPrice(label="Безлимитный доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
     
     invoice_kwargs = {
-        "title": "Безлимит в «Дипломате» 💎",
+        "title": "Безлимит в AI-Бизнес Ментор 💎",
         "description": "Навсегда снимите ограничения. Решайте любые бизнес-задачи без лимитов.",
         "payload": payload,
         "provider_token": config.PROVIDER_TOKEN,
