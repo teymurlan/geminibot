@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера (новый синтаксис aiogram 3.7.0+)
+# Инициализация бота и диспетчера
 bot = Bot(
     token=config.BOT_TOKEN, 
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -137,7 +137,6 @@ async def btn_new_text(message: Message, state: FSMContext):
 
 @router.message(F.text)
 async def process_user_text(message: Message, state: FSMContext):
-    # Игнорируем команды и кнопки
     if message.text.startswith('/') or message.text in ["✍️ Новый текст", "💎 Купить безлимит", "📊 Мой статус", "❓ Помощь"]:
         return
 
@@ -150,7 +149,6 @@ async def process_user_text(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов). Сократите его.")
         return
 
-    # Сохраняем текст в состояние
     await state.update_data(source_text=text)
     await state.set_state(DiplomatState.text_saved)
     
@@ -187,7 +185,6 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await check_user(user_id)
     
-    # Проверка лимитов
     if not user['is_premium'] and user['free_requests'] <= 0:
         await callback.message.answer(config.TEXT_PAYWALL, reply_markup=get_paywall_keyboard())
         await callback.answer()
@@ -208,13 +205,11 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Неизвестный стиль.", show_alert=True)
         return
 
-    # Уведомляем пользователя о начале работы
     try:
         await callback.message.edit_text(f"⏳ Переписываю в стиле «{style_info['btn']}»...")
     except TelegramBadRequest:
         pass
 
-    # Обращение к Gemini (новый синтаксис)
     try:
         prompt = f"{style_info['prompt']}\n\nТекст для обработки:\n{source_text}"
         
@@ -235,7 +230,6 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Обновление БД
     database.save_usage(user_id, style_key, source_text, result_text)
     database.increment_total_requests(user_id)
     
@@ -243,13 +237,9 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
         database.decrement_request(user_id)
         user['free_requests'] -= 1
 
-    # Формирование ответа
-    # Экранируем HTML, чтобы ответ Gemini не сломал разметку Telegram
     safe_result = html.escape(result_text)
-    
     final_msg = f"✨ <b>Результат ({style_info['btn']}):</b>\n\n<code>{safe_result}</code>"
     
-    # Маркетинговая вставка
     if not user['is_premium']:
         if user['free_requests'] == 1:
             final_msg += config.TEXT_LAST_ATTEMPT
@@ -287,13 +277,9 @@ async def process_buy(event: Message | CallbackQuery):
             await event.answer(msg)
         return
 
-    # Уникальный payload для транзакции
     payload = f"premium_{user_id}_{uuid.uuid4().hex[:8]}"
-    
     prices = [LabeledPrice(label="Безлимитный доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
     
-    # Отправка инвойса
-    # Для Telegram Stars provider_token ДОЛЖЕН быть пустым, currency ДОЛЖНА быть "XTR"
     invoice_kwargs = {
         "title": "Безлимит в «Дипломате» 💎",
         "description": "Навсегда снимите ограничения. Переписывайте любые сообщения в профессиональный деловой стиль.",
@@ -311,7 +297,6 @@ async def process_buy(event: Message | CallbackQuery):
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
-    # Подтверждаем готовность принять платеж
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @router.message(F.successful_payment)
@@ -319,7 +304,6 @@ async def successful_payment_handler(message: Message):
     payment_info = message.successful_payment
     user_id = message.from_user.id
     
-    # Сохраняем платеж. Если payload уже есть, save_payment вернет False
     is_new = database.save_payment(
         user_id=user_id,
         amount=payment_info.total_amount,
@@ -339,18 +323,28 @@ async def successful_payment_handler(message: Message):
 @dp.errors()
 async def global_error_handler(event):
     logger.error(f"Update caused error: {event.exception}")
-    # В продакшене мы логируем ошибку, но не показываем traceback пользователю
     return True
 
-# --- ЗАПУСК ---
+# --- ЖИЗНЕННЫЙ ЦИКЛ БОТА (ИСПРАВЛЕНИЕ КОНФЛИКТОВ RAILWAY) ---
+
+async def on_startup(bot: Bot):
+    database.init_db()
+    # Сбрасываем старые апдейты, чтобы не было конфликтов
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Bot started and webhook dropped")
+
+async def on_shutdown(bot: Bot):
+    logger.info("Bot shutting down. Closing session...")
+    # Корректно закрываем сессию, чтобы Railway мог запустить новый контейнер без конфликтов
+    await bot.session.close()
 
 async def main():
-    database.init_db()
     dp.include_router(router)
     
-    # Удаляем вебхуки и запускаем polling
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Bot started")
+    # Регистрируем функции старта и остановки
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
