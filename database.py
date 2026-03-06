@@ -6,15 +6,12 @@ import config
 logger = logging.getLogger(__name__)
 
 def get_connection():
-    # check_same_thread=False позволяет использовать sqlite3 в асинхронном aiogram
     return sqlite3.connect(config.DB_PATH, check_same_thread=False)
 
 def init_db():
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
-            
-            # ИСПРАВЛЕНО: Используем f-строку вместо знака вопроса для DEFAULT
             cursor.execute(f'''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -25,8 +22,6 @@ def init_db():
                     updated_at TEXT
                 )
             ''')
-            
-            # Таблица платежей
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS payments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,8 +33,6 @@ def init_db():
                     created_at TEXT
                 )
             ''')
-            
-            # Таблица истории использования
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS usage_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,6 +68,13 @@ def get_user(user_id: int) -> dict:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+def get_all_users() -> list:
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        return [dict(row) for row in cursor.fetchall()]
+
 def decrement_request(user_id: int):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -102,6 +102,15 @@ def set_premium(user_id: int, value: bool = True):
         )
         conn.commit()
 
+def add_requests(user_id: int, amount: int):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET free_requests = free_requests + ?, updated_at = ? WHERE user_id = ?",
+            (amount, datetime.utcnow().isoformat(), user_id)
+        )
+        conn.commit()
+
 def save_payment(user_id: int, amount: int, currency: str, payload: str, status: str):
     try:
         with get_connection() as conn:
@@ -113,7 +122,6 @@ def save_payment(user_id: int, amount: int, currency: str, payload: str, status:
             conn.commit()
             return True
     except sqlite3.IntegrityError:
-        # Защита от повторной обработки одного и того же payload
         return False
 
 def save_usage(user_id: int, tone: str, source_text: str, result_text: str):
