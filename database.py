@@ -14,17 +14,17 @@ def init_db():
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Таблица пользователей
-            cursor.execute('''
+            # Таблица пользователей (Исправлено: используем f-строку для DEFAULT)
+            cursor.execute(f'''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
-                    free_requests INTEGER NOT NULL DEFAULT ?,
+                    free_requests INTEGER NOT NULL DEFAULT {config.FREE_REQUESTS_DEFAULT},
                     is_premium INTEGER NOT NULL DEFAULT 0,
                     total_requests INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT,
                     updated_at TEXT
                 )
-            ''', (config.FREE_REQUESTS_DEFAULT,))
+            ''')
             
             # Таблица платежей
             cursor.execute('''
