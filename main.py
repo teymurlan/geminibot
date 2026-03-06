@@ -11,7 +11,9 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
-import google.generativeai as genai
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from google import genai
 
 import config
 import database
@@ -23,16 +25,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
-# Используем HTML parse_mode для безопасного экранирования
-bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
+# Инициализация бота и диспетчера (новый синтаксис aiogram 3.7.0+)
+bot = Bot(
+    token=config.BOT_TOKEN, 
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 router = Router()
 
-# Настройка Gemini API
-genai.configure(api_key=config.GEMINI_API_KEY)
-# Используем стабильную модель
-model = genai.GenerativeModel('gemini-2.5-flash')
+# Настройка нового Gemini API клиента
+gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 # FSM Состояния
 class DiplomatState(StatesGroup):
@@ -212,10 +214,14 @@ async def process_style_selection(callback: CallbackQuery, state: FSMContext):
     except TelegramBadRequest:
         pass
 
-    # Обращение к Gemini
+    # Обращение к Gemini (новый синтаксис)
     try:
         prompt = f"{style_info['prompt']}\n\nТекст для обработки:\n{source_text}"
-        response = await model.generate_content_async(prompt)
+        
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
         result_text = response.text.strip()
         
         if not result_text:
