@@ -38,6 +38,7 @@ class AdminState(StatesGroup):
 
 # --- УТИЛИТЫ ФОРМАТИРОВАНИЯ ---
 def format_gemini_response(text: str) -> str:
+    """Безопасное преобразование Markdown от Gemini в HTML для Telegram."""
     text = html.escape(text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'^###\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
@@ -51,8 +52,7 @@ def format_gemini_response(text: str) -> str:
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✍️ Отправить текст")],
-            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="💎 Купить безлимит")],
+            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="💎 Купить PRO")],
             [KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True
@@ -71,27 +71,27 @@ def get_categories_keyboard():
         builder.append(row)
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
-def get_prompts_keyboard(category_id: str):
+def get_tasks_keyboard(category_id: str):
     """Меню конкретных задач внутри категории + кнопка Назад"""
     builder = []
-    prompts = config.CATEGORIES[category_id].get("prompts", config.CATEGORIES[category_id].get("prompt", {}))
+    tasks = config.CATEGORIES[category_id]["tasks"]
     
-    for prompt_id, prompt_data in prompts.items():
-        builder.append([InlineKeyboardButton(text=prompt_data["btn"], callback_data=f"gen_{category_id}_{prompt_id}")])
+    for task_id, task_data in tasks.items():
+        builder.append([InlineKeyboardButton(text=task_data["btn"], callback_data=f"task_{category_id}_{task_id}")])
         
     builder.append([InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="back_to_cats")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 def get_post_generation_keyboard(is_premium: bool):
     """Клавиатура после генерации текста"""
-    buttons = [[InlineKeyboardButton(text="🔁 Другая задача с этим же текстом", callback_data="back_to_cats")]]
+    buttons = [[InlineKeyboardButton(text="🔁 Сделать что-то еще с этим текстом", callback_data="back_to_cats")]]
     if not is_premium:
-        buttons.append([InlineKeyboardButton(text="💎 Купить безлимит", callback_data="buy_premium")])
+        buttons.append([InlineKeyboardButton(text="💎 Купить PRO безлимит", callback_data="buy_premium")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_paywall_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Купить безлимит (50 Stars)", callback_data="buy_premium")]
+        [InlineKeyboardButton(text=f"💎 Купить PRO ({config.SUBSCRIPTION_PRICE_STARS} Stars)", callback_data="buy_premium")]
     ])
 
 # --- КЛАВИАТУРЫ АДМИНА ---
@@ -129,26 +129,21 @@ async def cmd_help(message: Message, state: FSMContext):
 async def cmd_status(message: Message, state: FSMContext):
     await state.clear()
     user = await check_user(message.from_user.id)
-    status_text = "💎 <b>Premium (Безлимит)</b>" if user['is_premium'] else "🆓 <b>Бесплатный тариф</b>"
+    status_text = "💎 <b>PRO (Безлимит)</b>" if user['is_premium'] else "🆓 <b>Бесплатный тариф</b>"
     
     text = (
         f"👤 <b>Ваш профиль:</b>\n\n"
         f"Тариф: {status_text}\n"
-        f"Использовано запросов: <b>{user['total_requests']}</b>\n"
+        f"Сгенерировано ответов: <b>{user['total_requests']}</b>\n"
         f"Ваш ID: <code>{message.from_user.id}</code>\n"
     )
     
     if not user['is_premium']:
         text += f"Осталось бесплатных попыток: <b>{user['free_requests']}</b>\n\n"
-        text += "<i>Premium даёт безлимитный доступ навсегда. Вы забудете о лимитах и сможете решать любые рабочие задачи.</i>"
+        text += "<i>PRO-тариф дает безлимитный доступ ко всем инструментам продаж и контента навсегда.</i>"
         await message.answer(text, reply_markup=get_paywall_keyboard())
     else:
         await message.answer(text)
-
-@router.message(F.text == "✍️ Отправить текст")
-async def btn_send_text(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Просто отправьте мне любой текст, письмо или идею в чат 👇")
 
 # --- ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ С КНОПКАМИ НАЗАД ---
 @router.message(Command("admin"))
@@ -175,12 +170,11 @@ async def admin_stats(callback: CallbackQuery):
     text = (
         "📊 <b>Статистика проекта:</b>\n\n"
         f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"💎 Premium пользователей: {stats['premium_users']}\n"
+        f"💎 PRO пользователей: {stats['premium_users']}\n"
         f"📝 Всего генераций: {stats['total_generations']}\n"
         f"💳 Успешных оплат: {stats['total_payments']}\n"
         f"💰 Доход: {stats['total_revenue_stars']} Stars"
     )
-    # Добавляем кнопку Назад в админку
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_cancel")]])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
@@ -251,28 +245,27 @@ async def admin_add_req_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Количество должно быть числом. Попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
 
-
 # --- ЕДИНАЯ ТОЧКА ВХОДА ДЛЯ ТЕКСТА ПОЛЬЗОВАТЕЛЯ ---
 @router.message(F.text)
 async def process_any_text(message: Message, state: FSMContext):
     if message.text.startswith('/'):
         return
-    if message.text in ["✍️ Отправить текст", "👤 Мой профиль", "💎 Купить безлимит", "❓ Помощь"]:
+    if message.text in ["👤 Мой профиль", "💎 Купить PRO", "❓ Помощь"]:
         return
 
     text = message.text.strip()
     if len(text) < config.MIN_TEXT_LENGTH:
-        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более содержательное сообщение или данные.")
+        await message.answer("⚠️ Текст слишком короткий. Пожалуйста, отправьте более содержательное сообщение или идею.")
         return
     if len(text) > config.MAX_TEXT_LENGTH:
         await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов). Сократите его.")
         return
 
+    # Сохраняем текст в FSM
     await state.update_data(source_text=text)
-    await state.set_state(AppState.text_saved)
     
     await message.answer(
-        "✅ <b>Текст принят!</b>\nВыберите категорию задачи:",
+        f"✅ <b>Данные получены!</b>\nВыберите, что мы будем с этим делать:",
         reply_markup=get_categories_keyboard()
     )
 
@@ -281,17 +274,17 @@ async def process_any_text(message: Message, state: FSMContext):
 async def back_to_categories(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data.get("source_text"):
-        await callback.message.answer("Текст потерялся. Пожалуйста, отправьте его заново.")
+        await callback.message.answer("Данные потерялись. Пожалуйста, отправьте текст заново.")
         await callback.answer()
         return
     try:
-        await callback.message.edit_text("✅ <b>Текст принят!</b>\nВыберите категорию задачи:", reply_markup=get_categories_keyboard())
+        await callback.message.edit_text("✅ <b>Данные получены!</b>\nВыберите, что мы будем с этим делать:", reply_markup=get_categories_keyboard())
     except TelegramBadRequest:
         pass
     await callback.answer()
 
 @router.callback_query(F.data.startswith("cat_"))
-async def show_category_prompts(callback: CallbackQuery, state: FSMContext):
+async def show_category_tasks(callback: CallbackQuery, state: FSMContext):
     cat_id = callback.data.split("_")[1]
     cat_info = config.CATEGORIES.get(cat_id)
     
@@ -301,16 +294,15 @@ async def show_category_prompts(callback: CallbackQuery, state: FSMContext):
         
     try:
         await callback.message.edit_text(
-            f"Категория: <b>{cat_info['name']}</b>\nВыберите конкретную задачу 👇", 
-            reply_markup=get_prompts_keyboard(cat_id)
+            f"Раздел: <b>{cat_info['name']}</b>\nВыберите конкретную задачу 👇", 
+            reply_markup=get_tasks_keyboard(cat_id)
         )
     except TelegramBadRequest:
         pass
     await callback.answer()
 
-
 # --- ВЫПОЛНЕНИЕ ЗАДАЧ (GEMINI) ---
-@router.callback_query(F.data.startswith("gen_"))
+@router.callback_query(F.data.startswith("task_"))
 async def process_generation(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await check_user(user_id)
@@ -324,30 +316,29 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
     source_text = data.get("source_text")
     
     if not source_text:
-        await callback.message.answer("Текст потерялся 😔 Пожалуйста, отправьте его заново.")
+        await callback.message.answer("Данные потерялись 😔 Пожалуйста, отправьте текст заново.")
         await callback.answer()
         return
 
-    # Парсим callback: gen_{cat_id}_{prompt_id}
+    # Парсим callback: task_{cat_id}_{task_id}
     parts = callback.data.split("_")
     cat_id = parts[1]
-    prompt_id = parts[2]
+    task_id = parts[2]
     
     # Достаем промпт
-    prompts_dict = config.CATEGORIES.get(cat_id, {}).get("prompts", config.CATEGORIES.get(cat_id, {}).get("prompt", {}))
-    info = prompts_dict.get(prompt_id)
+    task_info = config.CATEGORIES.get(cat_id, {}).get("tasks", {}).get(task_id)
     
-    if not info:
+    if not task_info:
         await callback.answer("Неизвестная задача.", show_alert=True)
         return
 
     try:
-        await callback.message.edit_text(f"⏳ Обрабатываю (Задача: {info['btn']})...")
+        await callback.message.edit_text(f"⏳ Генерирую (Задача: {task_info['btn']})...")
     except TelegramBadRequest:
         pass
 
     try:
-        prompt = f"{info['prompt']}\n\nДанные от пользователя:\n{source_text}"
+        prompt = f"{task_info['prompt']}\n\nВводные данные от пользователя:\n{source_text}"
         response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         result_text = response.text.strip()
         if not result_text:
@@ -358,7 +349,7 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    database.save_usage(user_id, f"{cat_id}_{prompt_id}", source_text, result_text)
+    database.save_usage(user_id, f"{cat_id}_{task_id}", source_text, result_text)
     database.increment_total_requests(user_id)
     
     if not user['is_premium']:
@@ -366,7 +357,7 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
         user['free_requests'] -= 1
 
     safe_result = format_gemini_response(result_text)
-    final_msg = f"✨ <b>Результат ({info['btn']}):</b>\n\n{safe_result}"
+    final_msg = f"✨ <b>Результат ({task_info['btn']}):</b>\n\n{safe_result}"
     
     if not user['is_premium']:
         if user['free_requests'] == 1:
@@ -383,14 +374,14 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
 
 # --- ПЛАТЕЖИ (TELEGRAM STARS) ---
 @router.message(Command("buy"))
-@router.message(F.text == "💎 Купить безлимит")
+@router.message(F.text == "💎 Купить PRO")
 @router.callback_query(F.data == "buy_premium")
 async def process_buy(event: Message | CallbackQuery):
     user_id = event.from_user.id
     user = await check_user(user_id)
     
     if user['is_premium']:
-        msg = "У вас уже активирован Premium! 💎 Вы можете пользоваться ботом без ограничений."
+        msg = "У вас уже активирован PRO! 💎 Вы можете пользоваться ботом без ограничений."
         if isinstance(event, CallbackQuery):
             await event.message.answer(msg)
             await event.answer()
@@ -399,11 +390,11 @@ async def process_buy(event: Message | CallbackQuery):
         return
 
     payload = f"premium_{user_id}_{uuid.uuid4().hex[:8]}"
-    prices = [LabeledPrice(label="Безлимитный доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
+    prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
     
     invoice_kwargs = {
-        "title": "Безлимит в AI-Бизнес Ментор 💎",
-        "description": "Навсегда снимите ограничения. Решайте любые бизнес-задачи без лимитов.",
+        "title": "PRO Доступ навсегда 💎",
+        "description": "Снимите все лимиты. Делайте вирусные Reels, закрывайте сделки и пишите посты в 1 клик.",
         "payload": payload,
         "provider_token": config.PROVIDER_TOKEN,
         "currency": "XTR",
