@@ -6,7 +6,8 @@ import uuid
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, PreCheckoutQuery, LabeledPrice
+    ReplyKeyboardMarkup, KeyboardButton, PreCheckoutQuery, LabeledPrice,
+    BotCommand
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -36,9 +37,18 @@ class AdminState(StatesGroup):
     waiting_for_add_req_id = State()
     waiting_for_add_req_amount = State()
 
+# --- УСТАНОВКА МЕНЮ КОМАНД В TELEGRAM ---
+async def set_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="🚀 Главное меню"),
+        BotCommand(command="profile", description="👤 Мой профиль и лимиты"),
+        BotCommand(command="premium", description="💎 Купить PRO безлимит"),
+        BotCommand(command="help", description="❓ Инструкция"),
+    ]
+    await bot.set_my_commands(commands)
+
 # --- УТИЛИТЫ ФОРМАТИРОВАНИЯ ---
 def format_gemini_response(text: str) -> str:
-    """Безопасное преобразование Markdown от Gemini в HTML для Telegram."""
     text = html.escape(text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'^###\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
@@ -59,7 +69,6 @@ def get_main_keyboard():
     )
 
 def get_categories_keyboard():
-    """Главное меню выбора категории после отправки текста"""
     builder = []
     row = []
     for cat_id, cat_data in config.CATEGORIES.items():
@@ -72,18 +81,14 @@ def get_categories_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 def get_tasks_keyboard(category_id: str):
-    """Меню конкретных задач внутри категории + кнопка Назад"""
     builder = []
     tasks = config.CATEGORIES[category_id]["tasks"]
-    
     for task_id, task_data in tasks.items():
         builder.append([InlineKeyboardButton(text=task_data["btn"], callback_data=f"task_{category_id}_{task_id}")])
-        
     builder.append([InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="back_to_cats")])
     return InlineKeyboardMarkup(inline_keyboard=builder)
 
 def get_post_generation_keyboard(is_premium: bool):
-    """Клавиатура после генерации текста"""
     buttons = [[InlineKeyboardButton(text="🔁 Сделать что-то еще с этим текстом", callback_data="back_to_cats")]]
     if not is_premium:
         buttons.append([InlineKeyboardButton(text="💎 Купить PRO безлимит", callback_data="buy_premium")])
@@ -124,6 +129,7 @@ async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(config.TEXT_HELP, reply_markup=get_main_keyboard())
 
+@router.message(Command("profile"))
 @router.message(Command("status"))
 @router.message(F.text == "👤 Мой профиль")
 async def cmd_status(message: Message, state: FSMContext):
@@ -261,7 +267,6 @@ async def process_any_text(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Текст слишком длинный (максимум {config.MAX_TEXT_LENGTH} символов). Сократите его.")
         return
 
-    # Сохраняем текст в FSM
     await state.update_data(source_text=text)
     
     await message.answer(
@@ -320,12 +325,10 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Парсим callback: task_{cat_id}_{task_id}
     parts = callback.data.split("_")
     cat_id = parts[1]
     task_id = parts[2]
     
-    # Достаем промпт
     task_info = config.CATEGORIES.get(cat_id, {}).get("tasks", {}).get(task_id)
     
     if not task_info:
@@ -374,6 +377,7 @@ async def process_generation(callback: CallbackQuery, state: FSMContext):
 
 # --- ПЛАТЕЖИ (TELEGRAM STARS) ---
 @router.message(Command("buy"))
+@router.message(Command("premium"))
 @router.message(F.text == "💎 Купить PRO")
 @router.callback_query(F.data == "buy_premium")
 async def process_buy(event: Message | CallbackQuery):
@@ -439,6 +443,7 @@ async def global_error_handler(event):
 # --- ЖИЗНЕННЫЙ ЦИКЛ БОТА ---
 async def on_startup(bot: Bot):
     database.init_db()
+    await set_bot_commands(bot) # <-- Устанавливаем меню команд при запуске!
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Bot started and webhook dropped")
 
