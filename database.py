@@ -1,175 +1,178 @@
 import sqlite3
-import logging
-from datetime import datetime
+import datetime
 import config
 
-logger = logging.getLogger(__name__)
-
 def get_connection():
-    return sqlite3.connect(config.DB_PATH, check_same_thread=False)
+    return sqlite3.connect(config.DB_PATH)
 
 def init_db():
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    free_requests INTEGER NOT NULL,
-                    is_premium INTEGER NOT NULL DEFAULT 0,
-                    total_requests INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS payments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    amount INTEGER NOT NULL,
-                    currency TEXT NOT NULL,
-                    payload TEXT UNIQUE,
-                    status TEXT,
-                    created_at TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS usage_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    tone TEXT,
-                    source_text TEXT,
-                    result_text TEXT,
-                    created_at TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            ''')
-            conn.commit()
-            logger.info("Database initialized successfully.")
-    except Exception as e:
-        logger.error(f"Database initialization error: {e}")
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            is_premium BOOLEAN DEFAULT 0,
+            free_requests INTEGER DEFAULT 3,
+            total_requests INTEGER DEFAULT 0,
+            join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS usage_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            task_type TEXT,
+            input_text TEXT,
+            output_text TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            currency TEXT,
+            payload TEXT UNIQUE,
+            status TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
 
-def get_setting(key: str, default_value: str) -> str:
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cursor.fetchone()
-        return row[0] if row else default_value
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def get_setting(key: str, default: str) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default
 
 def set_setting(key: str, value: str):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-        conn.commit()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
 
 def create_user_if_not_exists(user_id: int):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        if not cursor.fetchone():
-            now = datetime.utcnow().isoformat()
-            # Берем дефолтное количество запросов из настроек
-            default_reqs = int(get_setting("free_requests_default", str(config.FREE_REQUESTS_FALLBACK)))
-            cursor.execute(
-                "INSERT INTO users (user_id, free_requests, is_premium, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
-                (user_id, default_reqs, now, now)
-            )
-            conn.commit()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        default_requests = int(get_setting("free_requests_default", str(config.FREE_REQUESTS_FALLBACK)))
+        cursor.execute("INSERT INTO users (user_id, free_requests) VALUES (?, ?)", (user_id, default_requests))
+        conn.commit()
+    conn.close()
 
-def get_user(user_id: int) -> dict:
-    with get_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        return dict(row) if row else None
-
-def get_all_users() -> list:
-    with get_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users")
-        return [dict(row) for row in cursor.fetchall()]
+def get_user(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "user_id": row[0],
+            "is_premium": bool(row[1]),
+            "free_requests": row[2],
+            "total_requests": row[3],
+            "join_date": row[4]
+        }
+    return None
 
 def decrement_request(user_id: int):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET free_requests = free_requests - 1, updated_at = ? WHERE user_id = ? AND free_requests > 0",
-            (datetime.utcnow().isoformat(), user_id)
-        )
-        conn.commit()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET free_requests = free_requests - 1 WHERE user_id = ? AND free_requests > 0", (user_id,))
+    conn.commit()
+    conn.close()
 
 def increment_total_requests(user_id: int):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET total_requests = total_requests + 1, updated_at = ? WHERE user_id = ?",
-            (datetime.utcnow().isoformat(), user_id)
-        )
-        conn.commit()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
-def set_premium(user_id: int, value: bool = True):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET is_premium = ?, updated_at = ? WHERE user_id = ?",
-            (1 if value else 0, datetime.utcnow().isoformat(), user_id)
-        )
-        conn.commit()
+def set_premium(user_id: int, status: bool):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET is_premium = ? WHERE user_id = ?", (int(status), user_id))
+    conn.commit()
+    conn.close()
 
 def add_requests(user_id: int, amount: int):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET free_requests = free_requests + ?, updated_at = ? WHERE user_id = ?",
-            (amount, datetime.utcnow().isoformat(), user_id)
-        )
-        conn.commit()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET free_requests = free_requests + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
 
-def save_payment(user_id: int, amount: int, currency: str, payload: str, status: str):
+def save_usage(user_id: int, task_type: str, input_text: str, output_text: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO usage_history (user_id, task_type, input_text, output_text) VALUES (?, ?, ?, ?)",
+                   (user_id, task_type, input_text, output_text))
+    conn.commit()
+    conn.close()
+
+def save_payment(user_id: int, amount: int, currency: str, payload: str, status: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
     try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO payments (user_id, amount, currency, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, amount, currency, payload, status, datetime.utcnow().isoformat())
-            )
-            conn.commit()
-            return True
-    except sqlite3.IntegrityError:
-        return False
-
-def save_usage(user_id: int, tone: str, source_text: str, result_text: str):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO usage_history (user_id, tone, source_text, result_text, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, tone, source_text, result_text, datetime.utcnow().isoformat())
-        )
+        cursor.execute("INSERT INTO payments (user_id, amount, currency, payload, status) VALUES (?, ?, ?, ?, ?)",
+                       (user_id, amount, currency, payload, status))
         conn.commit()
+        is_new = True
+    except sqlite3.IntegrityError:
+        is_new = False
+    conn.close()
+    return is_new
 
-def get_stats() -> dict:
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        stats = {}
-        cursor.execute("SELECT COUNT(*) FROM users")
-        stats['total_users'] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1")
-        stats['premium_users'] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM usage_history")
-        stats['total_generations'] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'success'")
-        row = cursor.fetchone()
-        stats['total_payments'] = row[0]
-        stats['total_revenue_stars'] = row[1] or 0
-        
-        return stats
+def get_stats():
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1")
+    premium_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM usage_history")
+    total_generations = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'success'")
+    payment_data = cursor.fetchone()
+    total_payments = payment_data[0]
+    total_revenue = payment_data[1] if payment_data[1] else 0
+    
+    conn.close()
+    return {
+        "total_users": total_users,
+        "premium_users": premium_users,
+        "total_generations": total_generations,
+        "total_payments": total_payments,
+        "total_revenue_stars": total_revenue
+    }
+
+def get_all_users():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"user_id": row[0]} for row in rows]
