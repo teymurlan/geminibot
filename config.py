@@ -1,23 +1,31 @@
 import os
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ---
-# Безопасно получаем токены из переменных окружения Railway
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DB_PATH = "bot_database.db"
+
+# Умный путь к БД: если есть папка data (Volume), пишем туда. Иначе - в корень.
+if os.path.exists("/app/data"):
+    DB_PATH = "/app/data/bot_database.db"
+else:
+    DB_PATH = "bot_database.db"
 
 # --- НАСТРОЙКИ АДМИНА И ОПЛАТЫ ---
-# Замените на свой Telegram ID (можно узнать у бота @userinfobot)
-ADMIN_ID = 123456789 
-ADMIN_USERNAME = "@your_username"
-
-# Токен провайдера ЮKassa (или другого) из BotFather. Если нет, оставьте пустым ""
-PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "") 
+ADMIN_ID = 123456789 # ВАЖНО: Впишите сюда ваш Telegram ID (цифры)
+ADMIN_USERNAME = "@your_username" # Ваш юзернейм для связи
 
 # Цены
 SUBSCRIPTION_PRICE_STARS = 150
 SUBSCRIPTION_PRICE_RUB = 990
-MANUAL_PAYMENT_DETAILS = "Карта Сбербанк/Т-Банк: 0000 0000 0000 0000"
+
+# Реквизиты для ручной оплаты (СБП / Крипта)
+MANUAL_PAYMENT_DETAILS = """
+💳 <b>СБП / Перевод на карту:</b>
+Сбербанк / Т-Банк: <code>0000 0000 0000 0000</code> (Иван И.)
+
+🪙 <b>Криптовалюта (USDT TRC20):</b>
+<code>TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX</code>
+"""
 
 # --- ЛИМИТЫ ---
 FREE_REQUESTS_FALLBACK = 3
@@ -25,7 +33,7 @@ MIN_TEXT_LENGTH = 10
 MAX_TEXT_LENGTH = 3000
 
 # --- ТЕКСТЫ ---
-TEXT_START = "👋 <b>Добро пожаловать!</b>\n\nЯ — ваш личный AI-помощник для создания контента и продаж. Выберите нужный инструмент в меню ниже."
+TEXT_START = "👋 <b>Добро пожаловать!</b>\n\nЯ — ваш личный AI-помощник для создания контента и продаж. Выберите нужный инструмент в меню ниже 👇"
 TEXT_HELP = "❓ <b>Как пользоваться ботом:</b>\n1. Выберите категорию.\n2. Выберите инструмент.\n3. Отправьте текст/запрос.\n4. Получите готовый результат!"
 TEXT_PAYWALL = "💎 <b>Лимит исчерпан!</b>\n\nЧтобы продолжить пользоваться ботом без ограничений, приобретите PRO-доступ."
 TEXT_LAST_ATTEMPT = "\n\n⚠️ <i>Это ваша последняя бесплатная попытка!</i>"
