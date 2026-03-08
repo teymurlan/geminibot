@@ -6,7 +6,7 @@ import uuid
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    PreCheckoutQuery, LabeledPrice, BotCommand
+    PreCheckoutQuery, LabeledPrice, BotCommand, ReplyKeyboardRemove
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -59,7 +59,7 @@ def format_gemini_response(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ ---
+# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ (Только Inline) ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Начать работу", callback_data="menu_categories")],
@@ -146,6 +146,11 @@ async def check_user(user_id: int):
 async def cmd_start(message: Message, state: FSMContext):
     await check_user(message.from_user.id)
     await state.clear()
+    
+    # Трюк: отправляем сообщение с командой удалить старые кнопки и сразу удаляем его
+    del_msg = await message.answer("🔄 Загрузка интерфейса...", reply_markup=ReplyKeyboardRemove())
+    await del_msg.delete()
+    
     await message.answer(config.TEXT_START, reply_markup=get_main_menu_keyboard())
 
 @router.callback_query(F.data == "menu_main")
@@ -171,6 +176,7 @@ async def show_help(event: Message | CallbackQuery, state: FSMContext):
         await event.answer(config.TEXT_HELP, reply_markup=get_back_to_main_keyboard())
 
 @router.message(Command("profile"))
+@router.message(Command("status"))
 @router.callback_query(F.data == "menu_profile")
 async def show_profile(event: Message | CallbackQuery, state: FSMContext):
     await state.clear()
@@ -321,6 +327,7 @@ async def process_task_input(message: Message, state: FSMContext):
 
 # --- ПЛАТЕЖИ (МУЛЬТИ-ОПЛАТА) ---
 @router.message(Command("premium"))
+@router.message(Command("buy"))
 @router.callback_query(F.data == "menu_premium")
 async def show_premium_info(event: Message | CallbackQuery, state: FSMContext):
     await state.clear()
@@ -363,7 +370,7 @@ async def process_buy_stars(callback: CallbackQuery):
         title="PRO Доступ навсегда 💎",
         description="Оплата через Telegram Stars.",
         payload=payload,
-        provider_token="", # ДЛЯ STARS ТОКЕН ДОЛЖЕН БЫТЬ ПУСТЫМ!
+        provider_token="", 
         currency="XTR",
         prices=prices
     )
@@ -382,7 +389,7 @@ async def process_buy_rub(callback: CallbackQuery):
         return
 
     payload = f"premium_rub_{user_id}_{uuid.uuid4().hex[:8]}"
-    prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_RUB * 100)] # В копейках
+    prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_RUB * 100)]
     
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
