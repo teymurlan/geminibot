@@ -36,6 +36,7 @@ class AdminState(StatesGroup):
     waiting_for_add_req_id = State()
     waiting_for_add_req_amount = State()
     waiting_for_new_limit = State()
+    waiting_for_pro_id = State()
 
 # --- УСТАНОВКА МЕНЮ КОМАНД ---
 async def set_bot_commands(bot: Bot):
@@ -58,7 +59,7 @@ def format_gemini_response(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ (Только Inline) ---
+# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Начать работу", callback_data="menu_categories")],
@@ -109,7 +110,9 @@ def get_post_generation_keyboard(cat_id: str, task_id: str, is_premium: bool):
 
 def get_paywall_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💎 Купить PRO ({config.SUBSCRIPTION_PRICE_STARS} Stars)", callback_data="buy_premium_action")],
+        [InlineKeyboardButton(text=f"⭐️ Оплатить Stars ({config.SUBSCRIPTION_PRICE_STARS} ⭐️)", callback_data="buy_stars")],
+        [InlineKeyboardButton(text=f"💳 Оплатить Картой/СБП ({config.SUBSCRIPTION_PRICE_RUB} ₽)", callback_data="buy_rub")],
+        [InlineKeyboardButton(text="🪙 Крипта / Прямой перевод", callback_data="buy_crypto")],
         [InlineKeyboardButton(text="🔙 В главное меню", callback_data="menu_main")]
     ])
 
@@ -117,7 +120,8 @@ def get_paywall_keyboard():
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="🎁 Выдать запросы", callback_data="admin_add_req")],
+        [InlineKeyboardButton(text="🎁 Выдать запросы", callback_data="admin_add_req"),
+         InlineKeyboardButton(text="👑 Выдать PRO", callback_data="admin_give_pro")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="⚙️ Настройки бота", callback_data="admin_settings")]
     ])
@@ -233,7 +237,6 @@ async def ask_for_text(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка инструмента", show_alert=True)
         return
 
-    # Проверка лимитов перед запросом текста
     user = await check_user(callback.from_user.id)
     if not user['is_premium'] and user['free_requests'] <= 0:
         await callback.message.edit_text(config.TEXT_PAYWALL, reply_markup=get_paywall_keyboard())
@@ -285,7 +288,7 @@ async def process_task_input(message: Message, state: FSMContext):
         return
 
     processing_msg = await message.answer(f"⏳ Генерирую результат...")
-    await state.clear() # Очищаем состояние, чтобы не блокировать другие команды
+    await state.clear()
 
     try:
         prompt = f"{task_info['prompt']}\n\nВводные данные от пользователя:\n{text}"
@@ -316,7 +319,7 @@ async def process_task_input(message: Message, state: FSMContext):
 
     await processing_msg.edit_text(final_msg, reply_markup=get_post_generation_keyboard(cat_id, task_id, user['is_premium']))
 
-# --- ПЛАТЕЖИ (TELEGRAM STARS) ---
+# --- ПЛАТЕЖИ (МУЛЬТИ-ОПЛАТА) ---
 @router.message(Command("premium"))
 @router.callback_query(F.data == "menu_premium")
 async def show_premium_info(event: Message | CallbackQuery, state: FSMContext):
@@ -331,7 +334,7 @@ async def show_premium_info(event: Message | CallbackQuery, state: FSMContext):
         msg = (
             "💎 <b>PRO Доступ навсегда</b>\n\n"
             "Снимите все лимиты. Делайте вирусные Reels, закрывайте сделки и пишите посты в 1 клик.\n\n"
-            f"Стоимость: <b>{config.SUBSCRIPTION_PRICE_STARS} Stars</b>"
+            "Выберите удобный способ оплаты ниже 👇"
         )
         kb = get_paywall_keyboard()
 
@@ -344,28 +347,64 @@ async def show_premium_info(event: Message | CallbackQuery, state: FSMContext):
     else:
         await event.answer(msg, reply_markup=kb)
 
-@router.callback_query(F.data == "buy_premium_action")
-async def process_buy_action(callback: CallbackQuery):
+@router.callback_query(F.data == "buy_stars")
+async def process_buy_stars(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await check_user(user_id)
-    
     if user['is_premium']:
         await callback.answer("У вас уже есть PRO!", show_alert=True)
         return
 
-    payload = f"premium_{user_id}_{uuid.uuid4().hex[:8]}"
+    payload = f"premium_stars_{user_id}_{uuid.uuid4().hex[:8]}"
     prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
     
-    invoice_kwargs = {
-        "title": "PRO Доступ навсегда 💎",
-        "description": "Снимите все лимиты. Делайте вирусные Reels, закрывайте сделки и пишите посты в 1 клик.",
-        "payload": payload,
-        "provider_token": config.PROVIDER_TOKEN,
-        "currency": "XTR",
-        "prices": prices
-    }
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="PRO Доступ навсегда 💎",
+        description="Оплата через Telegram Stars.",
+        payload=payload,
+        provider_token="", # ДЛЯ STARS ТОКЕН ДОЛЖЕН БЫТЬ ПУСТЫМ!
+        currency="XTR",
+        prices=prices
+    )
+    await callback.answer()
 
-    await bot.send_invoice(chat_id=callback.message.chat.id, **invoice_kwargs)
+@router.callback_query(F.data == "buy_rub")
+async def process_buy_rub(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = await check_user(user_id)
+    if user['is_premium']:
+        await callback.answer("У вас уже есть PRO!", show_alert=True)
+        return
+
+    if not config.PROVIDER_TOKEN:
+        await callback.answer("Оплата картой временно недоступна. Выберите Stars или Прямой перевод.", show_alert=True)
+        return
+
+    payload = f"premium_rub_{user_id}_{uuid.uuid4().hex[:8]}"
+    prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_RUB * 100)] # В копейках
+    
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="PRO Доступ навсегда 💎",
+        description="Оплата банковской картой или СБП.",
+        payload=payload,
+        provider_token=config.PROVIDER_TOKEN,
+        currency="RUB",
+        prices=prices
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "buy_crypto")
+async def process_buy_crypto(callback: CallbackQuery):
+    text = (
+        "🪙 <b>Оплата Криптовалютой или прямым переводом (СБП)</b>\n\n"
+        f"Переведите <b>{config.SUBSCRIPTION_PRICE_RUB}₽</b> (или эквивалент) по реквизитам:\n\n"
+        f"<code>{config.MANUAL_PAYMENT_DETAILS}</code>\n\n"
+        f"После оплаты отправьте скриншот чека администратору: {config.ADMIN_USERNAME}\n"
+        "Администратор выдаст вам PRO-доступ вручную."
+    )
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")]]))
     await callback.answer()
 
 @router.pre_checkout_query()
@@ -419,7 +458,7 @@ async def admin_stats(callback: CallbackQuery):
         f"💎 PRO пользователей: {stats['premium_users']}\n"
         f"📝 Всего генераций: {stats['total_generations']}\n"
         f"💳 Успешных оплат: {stats['total_payments']}\n"
-        f"💰 Доход: {stats['total_revenue_stars']} Stars"
+        f"💰 Доход: {stats['total_revenue_stars']} Stars/RUB"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_cancel")]])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -485,6 +524,36 @@ async def admin_add_req_amount(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("❌ Количество должно быть числом. Попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
+
+# --- ВЫДАТЬ PRO (АДМИН) ---
+@router.callback_query(F.data == "admin_give_pro")
+async def admin_give_pro_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != config.ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_pro_id)
+    await callback.message.edit_text("Введите <b>ID пользователя</b>, которому нужно выдать PRO-доступ навсегда:", reply_markup=get_admin_cancel_keyboard())
+    await callback.answer()
+
+@router.message(AdminState.waiting_for_pro_id)
+async def admin_give_pro_id(message: Message, state: FSMContext):
+    try:
+        target_id = int(message.text.strip())
+        user = database.get_user(target_id)
+        if not user:
+            await message.answer("❌ Пользователь не найден. Проверьте ID и попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
+            return
+        
+        database.set_premium(target_id, True)
+        await message.answer(f"✅ Успешно! Пользователю <code>{target_id}</code> выдан PRO-доступ навсегда.")
+        
+        try:
+            await bot.send_message(target_id, "🎉 <b>Поздравляем!</b>\nАдминистратор выдал вам <b>PRO-доступ</b> навсегда. Наслаждайтесь безлимитом!")
+        except Exception:
+            pass
+            
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.", reply_markup=get_admin_cancel_keyboard())
 
 # --- ДИНАМИЧЕСКИЕ НАСТРОЙКИ АДМИНА ---
 @router.callback_query(F.data == "admin_settings")
