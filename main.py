@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatAction
 from google import genai
 
 import config
@@ -158,7 +158,12 @@ async def cb_menu_main(callback: CallbackQuery, state: FSMContext):
     try:
         await callback.message.edit_text(config.TEXT_START, reply_markup=get_main_menu_keyboard())
     except TelegramBadRequest:
-        pass
+        # Если старое сообщение нельзя отредактировать (например, это был инвойс), удаляем и шлем новое
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.message.answer(config.TEXT_START, reply_markup=get_main_menu_keyboard())
     await callback.answer()
 
 @router.message(Command("help"))
@@ -169,7 +174,11 @@ async def show_help(event: Message | CallbackQuery, state: FSMContext):
         try:
             await event.message.edit_text(config.TEXT_HELP, reply_markup=get_back_to_main_keyboard())
         except TelegramBadRequest:
-            pass
+            try:
+                await event.message.delete()
+            except:
+                pass
+            await event.message.answer(config.TEXT_HELP, reply_markup=get_back_to_main_keyboard())
         await event.answer()
     else:
         await event.answer(config.TEXT_HELP, reply_markup=get_back_to_main_keyboard())
@@ -200,7 +209,11 @@ async def show_profile(event: Message | CallbackQuery, state: FSMContext):
         try:
             await event.message.edit_text(text, reply_markup=kb)
         except TelegramBadRequest:
-            pass
+            try:
+                await event.message.delete()
+            except:
+                pass
+            await event.message.answer(text, reply_markup=kb)
         await event.answer()
     else:
         await event.answer(text, reply_markup=kb)
@@ -212,7 +225,11 @@ async def show_categories(callback: CallbackQuery, state: FSMContext):
     try:
         await callback.message.edit_text("🧰 <b>Выберите категорию инструментов:</b>", reply_markup=get_categories_keyboard())
     except TelegramBadRequest:
-        pass
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.message.answer("🧰 <b>Выберите категорию инструментов:</b>", reply_markup=get_categories_keyboard())
     await callback.answer()
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -292,7 +309,8 @@ async def process_task_input(message: Message, state: FSMContext):
         await message.answer(config.TEXT_PAYWALL, reply_markup=get_paywall_keyboard())
         return
 
-    processing_msg = await message.answer(f"⏳ Генерирую результат...")
+    processing_msg = await message.answer("⏳ <i>Анализирую запрос и генерирую ответ...</i>")
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING) # Эффект "печатает..."
     await state.clear()
 
     try:
@@ -348,7 +366,11 @@ async def show_premium_info(event: Message | CallbackQuery, state: FSMContext):
         try:
             await event.message.edit_text(msg, reply_markup=kb)
         except TelegramBadRequest:
-            pass
+            try:
+                await event.message.delete()
+            except:
+                pass
+            await event.message.answer(msg, reply_markup=kb)
         await event.answer()
     else:
         await event.answer(msg, reply_markup=kb)
@@ -364,14 +386,28 @@ async def process_buy_stars(callback: CallbackQuery):
     payload = f"premium_stars_{user_id}_{uuid.uuid4().hex[:8]}"
     prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_STARS)]
     
+    # 1. Удаляем старое сообщение с выбором оплаты, чтобы в чате остался ТОЛЬКО инвойс
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    
+    # 2. Создаем клавиатуру для инвойса (ОБЯЗАТЕЛЬНО первая кнопка с pay=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"⭐️ Заплатить {config.SUBSCRIPTION_PRICE_STARS} Stars", pay=True)],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="menu_premium")]
+    ])
+
+    # 3. Отправляем красивый инвойс
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
-        title="PRO Доступ навсегда 💎",
-        description="Оплата через Telegram Stars.",
+        title="💎 PRO Доступ навсегда",
+        description="Безлимитный доступ ко всем функциям бота: Reels, продажи, копирайтинг и стратегия. Моментальная активация после оплаты.",
         payload=payload,
         provider_token="", 
         currency="XTR",
-        prices=prices
+        prices=prices,
+        reply_markup=kb
     )
     await callback.answer()
 
@@ -387,7 +423,14 @@ async def process_buy_manual(callback: CallbackQuery):
         f"2. Отправьте скриншот чека и ваш ID (<code>{callback.from_user.id}</code>) администратору: {config.ADMIN_USERNAME}\n"
         f"3. Администратор выдаст вам PRO-доступ в течение пары минут!"
     )
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")]]))
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")]]))
+    except TelegramBadRequest:
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")]]))
     await callback.answer()
 
 @router.pre_checkout_query()
