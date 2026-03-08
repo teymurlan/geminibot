@@ -8,10 +8,20 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 DB_PATH = os.getenv("DB_PATH", "diplomat.db")
 
-PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
+# Для автоматической оплаты картой (ЮKassa через BotFather). Если нет - оставьте пустым.
+PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "") 
+
+# Цены
 SUBSCRIPTION_PRICE_STARS = int(os.getenv("SUBSCRIPTION_PRICE_STARS", 100))
-# FREE_REQUESTS_DEFAULT теперь берется из базы данных (настраивается в админке), 
-# здесь оставляем только фоллбэк значение
+SUBSCRIPTION_PRICE_RUB = int(os.getenv("SUBSCRIPTION_PRICE_RUB", 990))
+
+# Реквизиты для ручной оплаты (СБП / Крипта)
+MANUAL_PAYMENT_DETAILS = os.getenv(
+    "MANUAL_PAYMENT_DETAILS", 
+    "💳 СБП (Сбер/Тинькофф): +7 (999) 000-00-00\n🪙 USDT (TRC20): TYourWalletAddressHere"
+)
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@ваш_юзернейм") # Куда скидывать чеки
+
 FREE_REQUESTS_FALLBACK = 2 
 
 MIN_TEXT_LENGTH = 2
@@ -37,8 +47,7 @@ TEXT_PAYWALL = (
     "⚠️ <b>Бесплатные генерации закончились.</b>\n\n"
     "Один залетевший Reels принесет вам тысячи подписчиков. "
     "Один правильно закрытый клиент окупит этого бота на годы вперед.\n\n"
-    "Перестаньте тратить часы на рутину. Делегируйте это нейросети.\n\n"
-    f"💎 <b>Откройте безлимит навсегда всего за {SUBSCRIPTION_PRICE_STARS} Telegram Stars.</b>"
+    "Перестаньте тратить часы на рутину. Делегируйте это нейросети и откройте безлимит навсегда."
 )
 
 TEXT_LAST_ATTEMPT = (
