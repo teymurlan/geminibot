@@ -59,7 +59,7 @@ def format_gemini_response(text: str) -> str:
     text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
     return text
 
-# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ (Только Inline) ---
+# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Начать работу", callback_data="menu_categories")],
@@ -111,8 +111,8 @@ def get_post_generation_keyboard(cat_id: str, task_id: str, is_premium: bool):
 def get_paywall_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"⭐️ Оплатить Stars ({config.SUBSCRIPTION_PRICE_STARS} ⭐️)", callback_data="buy_stars")],
-        [InlineKeyboardButton(text=f"💳 Оплатить Картой/СБП ({config.SUBSCRIPTION_PRICE_RUB} ₽)", callback_data="buy_rub")],
-        [InlineKeyboardButton(text="🪙 Крипта / Прямой перевод", callback_data="buy_crypto")],
+        [InlineKeyboardButton(text=f"💳 Оплатить Картой / СБП ({config.SUBSCRIPTION_PRICE_RUB} ₽)", callback_data="buy_manual")],
+        [InlineKeyboardButton(text="🪙 Оплатить Криптовалютой", callback_data="buy_manual")],
         [InlineKeyboardButton(text="🔙 В главное меню", callback_data="menu_main")]
     ])
 
@@ -147,7 +147,6 @@ async def cmd_start(message: Message, state: FSMContext):
     await check_user(message.from_user.id)
     await state.clear()
     
-    # Трюк: отправляем сообщение с командой удалить старые кнопки и сразу удаляем его
     del_msg = await message.answer("🔄 Загрузка интерфейса...", reply_markup=ReplyKeyboardRemove())
     await del_msg.delete()
     
@@ -325,7 +324,7 @@ async def process_task_input(message: Message, state: FSMContext):
 
     await processing_msg.edit_text(final_msg, reply_markup=get_post_generation_keyboard(cat_id, task_id, user['is_premium']))
 
-# --- ПЛАТЕЖИ (МУЛЬТИ-ОПЛАТА) ---
+# --- ПЛАТЕЖИ ---
 @router.message(Command("premium"))
 @router.message(Command("buy"))
 @router.callback_query(F.data == "menu_premium")
@@ -376,40 +375,17 @@ async def process_buy_stars(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data == "buy_rub")
-async def process_buy_rub(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = await check_user(user_id)
-    if user['is_premium']:
-        await callback.answer("У вас уже есть PRO!", show_alert=True)
-        return
-
-    if not config.PROVIDER_TOKEN:
-        await callback.answer("Оплата картой временно недоступна. Выберите Stars или Прямой перевод.", show_alert=True)
-        return
-
-    payload = f"premium_rub_{user_id}_{uuid.uuid4().hex[:8]}"
-    prices = [LabeledPrice(label="PRO Доступ", amount=config.SUBSCRIPTION_PRICE_RUB * 100)]
-    
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="PRO Доступ навсегда 💎",
-        description="Оплата банковской картой или СБП.",
-        payload=payload,
-        provider_token=config.PROVIDER_TOKEN,
-        currency="RUB",
-        prices=prices
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "buy_crypto")
-async def process_buy_crypto(callback: CallbackQuery):
+@router.callback_query(F.data == "buy_manual")
+async def process_buy_manual(callback: CallbackQuery):
     text = (
-        "🪙 <b>Оплата Криптовалютой или прямым переводом (СБП)</b>\n\n"
-        f"Переведите <b>{config.SUBSCRIPTION_PRICE_RUB}₽</b> (или эквивалент) по реквизитам:\n\n"
-        f"<code>{config.MANUAL_PAYMENT_DETAILS}</code>\n\n"
-        f"После оплаты отправьте скриншот чека администратору: {config.ADMIN_USERNAME}\n"
-        "Администратор выдаст вам PRO-доступ вручную."
+        "💎 <b>Оплата PRO-доступа (Ручной режим)</b>\n\n"
+        "Пока автоматическая оплата картой и криптой находится в разработке, вы можете получить доступ, оплатив напрямую.\n\n"
+        f"<b>Стоимость:</b> {config.SUBSCRIPTION_PRICE_RUB} ₽ (или эквивалент в крипте)\n\n"
+        f"<b>Реквизиты:</b>\n{config.MANUAL_PAYMENT_DETAILS}\n\n"
+        f"✅ <b>Что делать дальше:</b>\n"
+        f"1. Переведите сумму по реквизитам выше.\n"
+        f"2. Отправьте скриншот чека и ваш ID (<code>{callback.from_user.id}</code>) администратору: {config.ADMIN_USERNAME}\n"
+        f"3. Администратор выдаст вам PRO-доступ в течение пары минут!"
     )
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_premium")]]))
     await callback.answer()
