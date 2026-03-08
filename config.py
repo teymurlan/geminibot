@@ -10,22 +10,24 @@ if os.path.exists("/app/data"):
 else:
     DB_PATH = "bot_database.db"
 
-# --- НАСТРОЙКИ АДМИНА И ОПЛАТЫ ---
-ADMIN_ID = 123456789 # ВАЖНО: Впишите сюда ваш Telegram ID (цифры)
-ADMIN_USERNAME = "@your_username" # Ваш юзернейм для связи
+# --- НАСТРОЙКИ АДМИНА И ОПЛАТЫ (БЕРУТСЯ ИЗ RAILWAY) ---
+# Получаем ADMIN_ID и безопасно переводим в число (если не указан, ставим 0)
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+except ValueError:
+    ADMIN_ID = 0
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
+
+# Реквизиты для ручной оплаты (СБП / Крипта)
+MANUAL_PAYMENT_DETAILS = os.getenv(
+    "MANUAL_PAYMENT_DETAILS", 
+    "💳 Реквизиты временно недоступны. Напишите администратору."
+)
 
 # Цены
 SUBSCRIPTION_PRICE_STARS = 150
 SUBSCRIPTION_PRICE_RUB = 990
-
-# Реквизиты для ручной оплаты (СБП / Крипта)
-MANUAL_PAYMENT_DETAILS = """
-💳 <b>СБП / Перевод на карту:</b>
-Сбербанк / Т-Банк: <code>0000 0000 0000 0000</code> (Иван И.)
-
-🪙 <b>Криптовалюта (USDT TRC20):</b>
-<code>TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX</code>
-"""
 
 # --- ЛИМИТЫ ---
 FREE_REQUESTS_FALLBACK = 3
