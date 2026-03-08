@@ -4,6 +4,9 @@ import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Путь к файлу базы данных
+DB_PATH = "bot_database.db"
+
 # Базовый промпт, который задает роль нейросети
 BASE_PROMPT = "Ты профессиональный маркетолог, копирайтер и стратег. Отвечай четко, по делу, используй форматирование текста."
 
