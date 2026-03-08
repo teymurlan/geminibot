@@ -12,10 +12,10 @@ def init_db():
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f'''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
-                    free_requests INTEGER NOT NULL DEFAULT {config.FREE_REQUESTS_DEFAULT},
+                    free_requests INTEGER NOT NULL,
                     is_premium INTEGER NOT NULL DEFAULT 0,
                     total_requests INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT,
@@ -43,10 +43,29 @@ def init_db():
                     created_at TEXT
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
             conn.commit()
             logger.info("Database initialized successfully.")
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
+
+def get_setting(key: str, default_value: str) -> str:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else default_value
+
+def set_setting(key: str, value: str):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
 
 def create_user_if_not_exists(user_id: int):
     with get_connection() as conn:
@@ -54,9 +73,11 @@ def create_user_if_not_exists(user_id: int):
         cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if not cursor.fetchone():
             now = datetime.utcnow().isoformat()
+            # Берем дефолтное количество запросов из настроек
+            default_reqs = int(get_setting("free_requests_default", str(config.FREE_REQUESTS_FALLBACK)))
             cursor.execute(
                 "INSERT INTO users (user_id, free_requests, is_premium, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
-                (user_id, config.FREE_REQUESTS_DEFAULT, now, now)
+                (user_id, default_reqs, now, now)
             )
             conn.commit()
 
